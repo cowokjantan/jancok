@@ -33,11 +33,8 @@ def load_json(filename, default_value):
         return default_value
 
 def save_json(filename, data):
-    try:
-        with open(filename, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        logging.error(f"❌ Gagal menyimpan data ke {filename}: {e}")
+    with open(filename, "w") as f:
+        json.dump(data, f, indent=4)
 
 def load_data():
     global WATCHED_ADDRESSES, TX_CACHE, LAST_BLOCK
@@ -52,23 +49,19 @@ def save_data():
 async def fetch_transactions(address):
     url = f"{BLOCKSCOUT_API}?module=account&action=tokentx&address={address}"
     async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    logging.error(f"❌ API Error {response.status} saat mengambil transaksi {address}")
-                    return {"result": []}
+        async with session.get(url) as response:
+            try:
                 return await response.json()
-        except (aiohttp.ClientError, json.JSONDecodeError) as e:
-            logging.error(f"❌ Gagal mengambil transaksi dari API: {e}")
-            return {"result": []}
+            except json.JSONDecodeError:
+                return {"result": []}
 
 async def track_transactions():
     while True:
         new_tx_count = 0
         notification_queue = asyncio.Queue()
 
-        # Gunakan salinan dictionary agar tidak berubah saat iterasi
-        for address, data in WATCHED_ADDRESSES.copy().items():
+        addresses_copy = list(WATCHED_ADDRESSES.items())  # Hindari iterasi dictionary langsung
+        for address, data in addresses_copy:
             transactions = await fetch_transactions(address)
             if transactions.get("result"):
                 last_block = LAST_BLOCK.get(address, 0)
@@ -84,7 +77,7 @@ async def track_transactions():
         if new_tx_count > 0:
             save_data()
             await send_notifications(notification_queue)
-
+        
         logging.info(f"✅ {new_tx_count} transaksi baru terdeteksi.")
         await asyncio.sleep(30)
 
@@ -93,7 +86,7 @@ async def send_notifications(queue):
         tx, address, name, chat_id = await queue.get()
         try:
             await notify_transaction(tx, address, name, chat_id)
-            await asyncio.sleep(2)  # Hindari spam Telegram
+            await asyncio.sleep(2)  # Hindari flood limit
         except Exception as e:
             logging.error(f"❌ Gagal mengirim notifikasi: {e}")
 
@@ -105,10 +98,7 @@ async def notify_transaction(tx, address, name, chat_id):
            f"🔗 <a href='https://soneium.blockscout.com/tx/{tx.get('hash')}'>Lihat di Block Explorer</a>")
     if len(msg) > 4096:
         msg = msg[:4090] + "..."
-    try:
-        await bot.send_message(chat_id, msg)
-    except Exception as e:
-        logging.error(f"❌ Gagal mengirim pesan ke {chat_id}: {e}")
+    await bot.send_message(chat_id, msg)
 
 async def detect_transaction_type(tx, address):
     sender = tx.get("from", "").lower()
@@ -123,18 +113,22 @@ async def detect_transaction_type(tx, address):
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    await message.answer("🚀 Selamat datang di Soneium Tracker!\nGunakan /add <address> <nama> untuk mulai melacak transaksi.")
+    await message.answer(
+        "🚀 Selamat datang di Soneium Tracker!\n"
+        "Gunakan <code>/add &lt;address&gt; &lt;nama&gt;</code> untuk mulai melacak transaksi.",
+        parse_mode="HTML"
+    )
 
 @dp.message(Command("add"))
 async def add_address(message: Message):
     parts = message.text.split()
     if len(parts) < 3:
-        await message.answer("⚠ Gunakan format: /add <address> <nama>")
+        await message.answer("⚠ Gunakan format: <code>/add &lt;address&gt; &lt;nama&gt;</code>", parse_mode="HTML")
         return
     address, name = parts[1], parts[2]
     WATCHED_ADDRESSES[address] = {"name": name, "chat_id": message.chat.id}
     save_json(WATCHED_ADDRESSES_FILE, WATCHED_ADDRESSES)
-    await message.answer(f"✅ Alamat {address} dengan nama {name} berhasil ditambahkan!")
+    await message.answer(f"✅ Alamat <code>{address}</code> dengan nama <b>{name}</b> berhasil ditambahkan!", parse_mode="HTML")
 
 async def main():
     logging.info("🚀 Bot mulai berjalan...")
