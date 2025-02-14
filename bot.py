@@ -24,7 +24,7 @@ LAST_BLOCK = {}
 
 BLOCKSCOUT_API = "https://soneium.blockscout.com/api"
 
-# Load functions
+# Load and save functions
 def load_json(filename, default_value):
     try:
         with open(filename, "r") as f:
@@ -39,12 +39,11 @@ def save_json(filename, data):
 def load_data():
     global WATCHED_ADDRESSES, TX_CACHE, LAST_BLOCK
     WATCHED_ADDRESSES = load_json(WATCHED_ADDRESSES_FILE, {})
-    TX_CACHE = set(load_json(TX_CACHE_FILE, []))
-    LAST_BLOCK = load_json(LAST_BLOCK_FILE, {})
+    
+    # Hapus cache agar hanya transaksi terbaru yang diproses
+    TX_CACHE = set()
 
-def save_data():
-    save_json(TX_CACHE_FILE, list(TX_CACHE))
-    save_json(LAST_BLOCK_FILE, LAST_BLOCK)
+    LAST_BLOCK = load_json(LAST_BLOCK_FILE, {})
 
 async def fetch_transactions(address):
     url = f"{BLOCKSCOUT_API}?module=account&action=tokentx&address={address}"
@@ -55,13 +54,21 @@ async def fetch_transactions(address):
             except json.JSONDecodeError:
                 return {"result": []}
 
+async def update_last_blocks():
+    global LAST_BLOCK
+    for address in WATCHED_ADDRESSES.keys():
+        transactions = await fetch_transactions(address)
+        if transactions.get("result"):
+            latest_block = max(int(tx["blockNumber"]) for tx in transactions["result"])
+            LAST_BLOCK[address] = latest_block
+    save_json(LAST_BLOCK_FILE, LAST_BLOCK)
+
 async def track_transactions():
     while True:
         new_tx_count = 0
         notification_queue = asyncio.Queue()
 
-        addresses_copy = list(WATCHED_ADDRESSES.items())  # Hindari iterasi dictionary langsung
-        for address, data in addresses_copy:
+        for address, data in WATCHED_ADDRESSES.items():
             transactions = await fetch_transactions(address)
             if transactions.get("result"):
                 last_block = LAST_BLOCK.get(address, 0)
@@ -75,9 +82,9 @@ async def track_transactions():
                         new_tx_count += 1
 
         if new_tx_count > 0:
-            save_data()
+            save_json(LAST_BLOCK_FILE, LAST_BLOCK)
             await send_notifications(notification_queue)
-        
+
         logging.info(f"✅ {new_tx_count} transaksi baru terdeteksi.")
         await asyncio.sleep(30)
 
@@ -115,24 +122,27 @@ async def detect_transaction_type(tx, address):
 async def start_handler(message: Message):
     await message.answer(
         "🚀 Selamat datang di Soneium Tracker!\n"
-        "Gunakan <code>/add &lt;address&gt; &lt;nama&gt;</code> untuk mulai melacak transaksi.",
-        parse_mode="HTML"
+        "Gunakan <code>/add &lt;alamat&gt; &lt;nama&gt;</code> untuk mulai melacak transaksi."
     )
 
 @dp.message(Command("add"))
 async def add_address(message: Message):
     parts = message.text.split()
     if len(parts) < 3:
-        await message.answer("⚠ Gunakan format: <code>/add &lt;address&gt; &lt;nama&gt;</code>", parse_mode="HTML")
+        await message.answer("⚠ Gunakan format: <code>/add &lt;alamat&gt; &lt;nama&gt;</code>")
         return
     address, name = parts[1], parts[2]
     WATCHED_ADDRESSES[address] = {"name": name, "chat_id": message.chat.id}
     save_json(WATCHED_ADDRESSES_FILE, WATCHED_ADDRESSES)
-    await message.answer(f"✅ Alamat <code>{address}</code> dengan nama <b>{name}</b> berhasil ditambahkan!", parse_mode="HTML")
+    await message.answer(f"✅ Alamat <code>{address}</code> dengan nama <b>{name}</b> berhasil ditambahkan!")
 
 async def main():
     logging.info("🚀 Bot mulai berjalan...")
     load_data()
+    
+    # Update LAST_BLOCK agar hanya transaksi baru yang dikirim
+    await update_last_blocks()
+    
     asyncio.create_task(track_transactions())
     await dp.start_polling(bot)
 
