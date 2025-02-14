@@ -8,7 +8,6 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -34,8 +33,11 @@ def load_json(filename, default_value):
         return default_value
 
 def save_json(filename, data):
-    with open(filename, "w") as f:
-        json.dump(data, f)
+    try:
+        with open(filename, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logging.error(f"❌ Gagal menyimpan data ke {filename}: {e}")
 
 def load_data():
     global WATCHED_ADDRESSES, TX_CACHE, LAST_BLOCK
@@ -50,25 +52,29 @@ def save_data():
 async def fetch_transactions(address):
     url = f"{BLOCKSCOUT_API}?module=account&action=tokentx&address={address}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            try:
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    logging.error(f"❌ API Error {response.status} saat mengambil transaksi {address}")
+                    return {"result": []}
                 return await response.json()
-            except json.JSONDecodeError:
-                return {"result": []}
+        except (aiohttp.ClientError, json.JSONDecodeError) as e:
+            logging.error(f"❌ Gagal mengambil transaksi dari API: {e}")
+            return {"result": []}
 
 async def track_transactions():
     while True:
         new_tx_count = 0
         notification_queue = asyncio.Queue()
 
-        for address, data in WATCHED_ADDRESSES.items():
+        # Gunakan salinan dictionary agar tidak berubah saat iterasi
+        for address, data in WATCHED_ADDRESSES.copy().items():
             transactions = await fetch_transactions(address)
             if transactions.get("result"):
                 last_block = LAST_BLOCK.get(address, 0)
                 for tx in transactions["result"]:
                     tx_hash = tx.get("hash")
                     block_number = int(tx.get("blockNumber", 0))
-
                     if tx_hash and tx_hash not in TX_CACHE and block_number > last_block:
                         TX_CACHE.add(tx_hash)
                         LAST_BLOCK[address] = block_number
@@ -78,7 +84,7 @@ async def track_transactions():
         if new_tx_count > 0:
             save_data()
             await send_notifications(notification_queue)
-        
+
         logging.info(f"✅ {new_tx_count} transaksi baru terdeteksi.")
         await asyncio.sleep(30)
 
@@ -87,12 +93,7 @@ async def send_notifications(queue):
         tx, address, name, chat_id = await queue.get()
         try:
             await notify_transaction(tx, address, name, chat_id)
-            await asyncio.sleep(2)
-        except TelegramRetryAfter as e:
-            logging.error(f"⚠ Rate limit! Menunggu {e.retry_after} detik.")
-            await asyncio.sleep(e.retry_after)
-        except TelegramBadRequest as e:
-            logging.error(f"❌ Bad Request: {e}")
+            await asyncio.sleep(2)  # Hindari spam Telegram
         except Exception as e:
             logging.error(f"❌ Gagal mengirim notifikasi: {e}")
 
@@ -102,18 +103,12 @@ async def notify_transaction(tx, address, name, chat_id):
            f"👤 <b>{name}</b>\n"
            f"🔹 Type: {tx_type}\n"
            f"🔗 <a href='https://soneium.blockscout.com/tx/{tx.get('hash')}'>Lihat di Block Explorer</a>")
-
     if len(msg) > 4096:
         msg = msg[:4090] + "..."
-
     try:
         await bot.send_message(chat_id, msg)
-    except TelegramRetryAfter as e:
-        logging.error(f"⚠ Rate limit! Menunggu {e.retry_after} detik.")
-        await asyncio.sleep(e.retry_after)
-        await bot.send_message(chat_id, msg)
-    except TelegramBadRequest as e:
-        logging.error(f"❌ Bad Request: {e}")
+    except Exception as e:
+        logging.error(f"❌ Gagal mengirim pesan ke {chat_id}: {e}")
 
 async def detect_transaction_type(tx, address):
     sender = tx.get("from", "").lower()
@@ -128,18 +123,18 @@ async def detect_transaction_type(tx, address):
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    await message.answer("🚀 Selamat datang di Soneium Tracker!\nGunakan <code>/add alamat_wallet nama</code> untuk mulai melacak transaksi.", parse_mode="HTML")
+    await message.answer("🚀 Selamat datang di Soneium Tracker!\nGunakan /add <address> <nama> untuk mulai melacak transaksi.")
 
 @dp.message(Command("add"))
 async def add_address(message: Message):
     parts = message.text.split()
     if len(parts) < 3:
-        await message.answer("⚠ Gunakan format: <code>/add alamat_wallet nama</code>", parse_mode="HTML")
+        await message.answer("⚠ Gunakan format: /add <address> <nama>")
         return
     address, name = parts[1], parts[2]
     WATCHED_ADDRESSES[address] = {"name": name, "chat_id": message.chat.id}
     save_json(WATCHED_ADDRESSES_FILE, WATCHED_ADDRESSES)
-    await message.answer(f"✅ Alamat <code>{address}</code> dengan nama <b>{name}</b> berhasil ditambahkan!", parse_mode="HTML")
+    await message.answer(f"✅ Alamat {address} dengan nama {name} berhasil ditambahkan!")
 
 async def main():
     logging.info("🚀 Bot mulai berjalan...")
