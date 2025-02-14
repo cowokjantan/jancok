@@ -15,16 +15,14 @@ bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 WATCHED_ADDRESSES_FILE = "watched_addresses.json"
-TX_CACHE_FILE = "tx_cache.json"
 LAST_BLOCK_FILE = "last_block.json"
 
 WATCHED_ADDRESSES = {}
-TX_CACHE = set()
 LAST_BLOCK = {}
 
 BLOCKSCOUT_API = "https://soneium.blockscout.com/api"
 
-# Load and save functions
+# Fungsi Load dan Save JSON
 def load_json(filename, default_value):
     try:
         with open(filename, "r") as f:
@@ -37,12 +35,8 @@ def save_json(filename, data):
         json.dump(data, f, indent=4)
 
 def load_data():
-    global WATCHED_ADDRESSES, TX_CACHE, LAST_BLOCK
+    global WATCHED_ADDRESSES, LAST_BLOCK
     WATCHED_ADDRESSES = load_json(WATCHED_ADDRESSES_FILE, {})
-    
-    # Hapus cache agar hanya transaksi terbaru yang diproses
-    TX_CACHE = set()
-
     LAST_BLOCK = load_json(LAST_BLOCK_FILE, {})
 
 async def fetch_transactions(address):
@@ -54,7 +48,8 @@ async def fetch_transactions(address):
             except json.JSONDecodeError:
                 return {"result": []}
 
-async def update_last_blocks():
+async def set_initial_last_block():
+    """ Set LAST_BLOCK ke blok terbaru agar tidak ada transaksi lama yang dikirim """
     global LAST_BLOCK
     for address in WATCHED_ADDRESSES.keys():
         transactions = await fetch_transactions(address)
@@ -73,13 +68,18 @@ async def track_transactions():
             if transactions.get("result"):
                 last_block = LAST_BLOCK.get(address, 0)
                 for tx in transactions["result"]:
-                    tx_hash = tx.get("hash")
                     block_number = int(tx.get("blockNumber", 0))
-                    if tx_hash and tx_hash not in TX_CACHE and block_number > last_block:
-                        TX_CACHE.add(tx_hash)
-                        LAST_BLOCK[address] = block_number
-                        notification_queue.put_nowait((tx, address, data.get("name", "Unknown"), data["chat_id"]))
-                        new_tx_count += 1
+                    
+                    # Jika transaksi dari blok lama, abaikan
+                    if block_number <= last_block:
+                        continue
+                    
+                    # Simpan blok terbaru
+                    LAST_BLOCK[address] = block_number
+
+                    # Masukkan ke dalam antrian notifikasi
+                    notification_queue.put_nowait((tx, address, data.get("name", "Unknown"), data["chat_id"]))
+                    new_tx_count += 1
 
         if new_tx_count > 0:
             save_json(LAST_BLOCK_FILE, LAST_BLOCK)
@@ -134,14 +134,22 @@ async def add_address(message: Message):
     address, name = parts[1], parts[2]
     WATCHED_ADDRESSES[address] = {"name": name, "chat_id": message.chat.id}
     save_json(WATCHED_ADDRESSES_FILE, WATCHED_ADDRESSES)
+
+    # Set blok terakhir untuk alamat baru agar tidak memunculkan transaksi lama
+    transactions = await fetch_transactions(address)
+    if transactions.get("result"):
+        latest_block = max(int(tx["blockNumber"]) for tx in transactions["result"])
+        LAST_BLOCK[address] = latest_block
+        save_json(LAST_BLOCK_FILE, LAST_BLOCK)
+
     await message.answer(f"✅ Alamat <code>{address}</code> dengan nama <b>{name}</b> berhasil ditambahkan!")
 
 async def main():
     logging.info("🚀 Bot mulai berjalan...")
     load_data()
     
-    # Update LAST_BLOCK agar hanya transaksi baru yang dikirim
-    await update_last_blocks()
+    # Set LAST_BLOCK ke blok terbaru agar tidak ada transaksi lama
+    await set_initial_last_block()
     
     asyncio.create_task(track_transactions())
     await dp.start_polling(bot)
